@@ -25,12 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # git clone direct (repos publics, anonyme, sans API) — évite le 404 d'actions/checkout tiers.
+      # git clone direct des repos PUBLICS Sackmann (token dans l'URL — évite le prompt
+      # d'auth du runner et le 404 API d'actions/checkout tiers).
       - name: Récupérer les données Sackmann (sparse)
+        env:
+          TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: '0'
         run: |
           set -e
           for t in atp wta; do
-            git clone --depth 1 --filter=blob:none --sparse "https://github.com/JeffSackmann/tennis_${t}.git" "sackmann/${t}"
+            git clone --depth 1 --filter=blob:none --sparse \
+              "https://x-access-token:${TOKEN}@github.com/JeffSackmann/tennis_${t}.git" "sackmann/${t}"
             git -C "sackmann/${t}" sparse-checkout set --no-cone \
               "${t}_players.csv" "${t}_rankings_20s.csv" "${t}_rankings_current.csv" "${t}_matches_2026.csv"
             echo "--- sackmann/${t} ---"; ls -la "sackmann/${t}" | grep -E '\.csv|total' || true
