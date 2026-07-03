@@ -7,9 +7,11 @@ name: build-tennis-data
 
 on:
   push:
-    paths:
-      - build.mjs
-      - .github/workflows/build.yml
+    branches: [main]
+    paths-ignore:          # évite la boucle : les commits de données ne relancent pas
+      - 'players/**'
+      - 'rankings/**'
+      - 'tournaments/**'
   schedule:
     - cron: '17 6 * * 1'   # lundis 06:17 UTC
   workflow_dispatch: {}
