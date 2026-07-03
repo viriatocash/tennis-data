@@ -10,7 +10,7 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 const KEY = process.env.BALLDONTLIE_KEY
-const BASE = 'https://api.balldontlie.io'
+const BASE = 'https://api.balldontlie.io'   // API tennis ATP/WTA
 const SEASON = new Date().getFullYear()
 const MAX_PLAYER_FILES = 400
 
