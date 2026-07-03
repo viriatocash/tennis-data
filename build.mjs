@@ -120,7 +120,9 @@ async function buildTour(tour) {
 
   console.log(`[${tour}] tournaments ${SEASON}…`)
   try {
-    const ts = await apiAll(`/${tour}/v1/tournaments`, { season: SEASON })
+    let ts = await apiAll(`/${tour}/v1/tournaments`, { season: SEASON })
+    if (ts.length === 0) { console.log(`  0 avec season=${SEASON} → réessai sans filtre`); ts = await apiAll(`/${tour}/v1/tournaments`, {}) }
+    console.log(`  tournois reçus: ${ts.length}${ts[0] ? ` · ex: ${JSON.stringify(ts[0]).slice(0, 240)}` : ''}`)
     const tournaments = ts.map(t => ({
       name: t.name ?? t.title, category: t.category ?? t.level, surface: t.surface,
       location: t.location ?? t.city, country: t.country ?? t.country_code,
