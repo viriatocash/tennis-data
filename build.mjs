@@ -1,128 +1,131 @@
-// Génère des JSON compacts (classements, tournois) à partir des données ouvertes de
-// Jeff Sackmann (tennis_atp / tennis_wta). Node 18+. Lancer : `node build.mjs`
-//
-// Les CSV Sackmann sont récupérés par le workflow (actions/checkout, fiable) dans
-// sackmann/{atp,wta}/ — ce script lit ces fichiers EN LOCAL (pas de fetch HTTP, que
-// raw.githubusercontent rate-limite depuis les runners).
+// Génère des JSON compacts (classements, historique de rang, tournois) pour ATP & WTA
+// à partir de l'API BallDontLie. Node 18+. Clé via variable d'env BALLDONTLIE_KEY.
 //
 // Sorties :
 //   players/{tour}/{slug}.json      → { name, country, current, history: { official: [{date,rank}] } }
 //   rankings/{tour}/{season}.json   → [ { rank, player, country, points } ]
-//   tournaments/{tour}/{season}.json→ [ { name, category, surface, start, winner } ]
+//   tournaments/{tour}/{season}.json→ [ { name, category, surface, location, country, start } ]
 
-import { mkdir, writeFile, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
-const SRC_DIR = { atp: 'sackmann/atp', wta: 'sackmann/wta' }   // lecture locale (checkout)
+const KEY = process.env.BALLDONTLIE_KEY
+const BASE = 'https://api.balldontlie.io'
 const SEASON = new Date().getFullYear()
-const MAX_PLAYER_FILES = 600   // borne le nb de fiches joueur (taille repo)
+const MAX_PLAYER_FILES = 400
 
-// ── CSV ────────────────────────────────────────────────────────────────────────
-function splitLine(line) {
-  const out = []; let cur = ''; let q = false
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i]
-    if (ch === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++ } else q = !q }
-    else if (ch === ',' && !q) { out.push(cur); cur = '' }
-    else cur += ch
+const sleep = ms => new Promise(r => setTimeout(r, ms))
+
+async function api(path, params = {}) {
+  const url = new URL(BASE + path)
+  for (const [k, v] of Object.entries(params)) if (v != null && v !== '') url.searchParams.set(k, v)
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const res = await fetch(url, { headers: { Authorization: KEY } })
+    if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue }
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${path} ${await res.text().catch(() => '')}`.slice(0, 200))
+    return res.json()
   }
-  out.push(cur); return out
+  throw new Error(`429 répété sur ${path}`)
 }
-function parseCSV(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.length > 0)
-  if (lines.length === 0) return []
-  const headers = splitLine(lines[0])
-  return lines.slice(1).map(l => {
-    const c = splitLine(l); const o = {}
-    headers.forEach((h, i) => { o[h] = c[i] })
-    return o
-  })
+async function apiAll(path, params = {}) {   // suit meta.next_cursor
+  let cursor, out = []
+  do {
+    const j = await api(path, { ...params, per_page: 100, cursor })
+    out.push(...(j.data ?? []))
+    cursor = j.meta?.next_cursor ?? j.meta?.next_page
+    await sleep(350)
+  } while (cursor)
+  return out
 }
-async function readFirst(dir, candidates) {
-  for (const name of candidates) {
-    try { const t = await readFile(join(dir, name), 'utf8'); console.log(`  ✓ ${name}`); return t }
-    catch { console.log(`  · absent ${name}`) }
-  }
-  throw new Error(`introuvable dans ${dir}: ${candidates.join(', ')}`)
+
+// Champs tolérants (on ne connaît pas 100% le schéma → plusieurs alias).
+function pName(p) {
+  if (!p) return ''
+  if (p.name) return String(p.name).trim()
+  return `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim()
 }
+function pCountry(p) { return p?.country_code || p?.country || p?.ioc || undefined }
+function rRank(r) { return Number(r.rank ?? r.position ?? r.ranking) }
+function rPoints(r) { return Number(r.points ?? r.ranking_points) || undefined }
 function slug(name) {
   return name.normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-}
-function isoDate(yyyymmdd) {
-  const s = String(yyyymmdd || '')
-  return s.length === 8 ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : ''
 }
 async function writeJson(path, data) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify(data))
 }
 
-// ── Par tour ─────────────────────────────────────────────────────────────────────
+// Dates ~mensuelles de 2025-01 à aujourd'hui (points de l'historique de rang).
+function historyDates() {
+  const out = []
+  const now = new Date()
+  for (let y = 2025; y <= now.getFullYear(); y++) {
+    for (let m = 0; m < 12; m++) {
+      const d = new Date(Date.UTC(y, m, 1))
+      if (d > now) break
+      out.push(d.toISOString().slice(0, 10))
+    }
+  }
+  out.push(now.toISOString().slice(0, 10))   // + aujourd'hui
+  return [...new Set(out)]
+}
+
 async function buildTour(tour) {
-  const dir = SRC_DIR[tour]
-  console.log(`[${tour}] players…`)
-  const players = parseCSV(await readFirst(dir, [`${tour}_players.csv`]))
-  const pById = new Map()
-  for (const p of players) {
-    const id = p.player_id
-    const name = `${p.name_first ?? ''} ${p.name_last ?? ''}`.trim()
-    if (id && name) pById.set(id, { name, country: p.ioc || undefined })
-  }
+  const dates = historyDates()
+  console.log(`[${tour}] ${dates.length} dates d'historique…`)
 
-  console.log(`[${tour}] rankings history…`)
-  const rankTexts = []
-  for (const c of [[`${tour}_rankings_20s.csv`, `${tour}_rankings_2020s.csv`], [`${tour}_rankings_current.csv`]]) {
-    try { rankTexts.push(await readFirst(dir, c)) } catch (e) { console.warn(`  skip: ${e.message}`) }
-  }
-  const rankRows = rankTexts.flatMap(parseCSV)
-  const histById = new Map()
-  let latestDate = ''
-  for (const r of rankRows) {
-    const id = r.player, date = isoDate(r.ranking_date), rank = Number(r.rank)
-    if (!id || !date || !Number.isFinite(rank)) continue
-    if (date > latestDate) latestDate = date
-    ;(histById.get(id) ?? histById.set(id, []).get(id)).push([date, rank])
-  }
+  const bioById = new Map()               // id → { name, country }
+  const histById = new Map()              // id → [[date, rank]]
+  let latest = []                         // dernière semaine (leaders)
+  let firstLogged = false
 
-  const latest = rankRows
-    .filter(r => isoDate(r.ranking_date) === latestDate && Number.isFinite(Number(r.rank)))
-    .sort((a, b) => Number(a.rank) - Number(b.rank))
+  for (const date of dates) {
+    let rows
+    try { rows = await api(`/${tour}/v1/rankings`, { date, per_page: 100 }).then(j => j.data ?? []) }
+    catch (e) { console.warn(`  ${date} skip: ${e.message}`); continue }
+    if (!firstLogged && rows[0]) { console.log(`  ex. row: ${JSON.stringify(rows[0]).slice(0, 220)}`); firstLogged = true }
+    for (const r of rows) {
+      const p = r.player ?? r
+      const id = p.id ?? r.player_id
+      const rk = rRank(r)
+      if (id == null || !Number.isFinite(rk)) continue
+      if (!bioById.has(id)) bioById.set(id, { name: pName(p), country: pCountry(p) })
+      ;(histById.get(id) ?? histById.set(id, []).get(id)).push([date, rk])
+    }
+    latest = rows   // la dernière itération = la plus récente
+    await sleep(350)
+  }
 
   let written = 0
+  const leaders = []
   for (const r of latest) {
-    if (written >= MAX_PLAYER_FILES) break
-    const id = r.player, bio = pById.get(id)
-    if (!bio) continue
-    const hist = (histById.get(id) ?? []).sort((a, b) => a[0].localeCompare(b[0]))
-    await writeJson(`players/${tour}/${slug(bio.name)}.json`, {
-      name: bio.name, country: bio.country, current: Number(r.rank),
-      history: { official: hist.map(([d, rk]) => ({ date: d, rank: rk })) },
-    })
-    written++
+    const p = r.player ?? r
+    const id = p.id ?? r.player_id
+    const rk = rRank(r)
+    if (id == null || !Number.isFinite(rk)) continue
+    const bio = bioById.get(id) ?? { name: pName(p), country: pCountry(p) }
+    if (bio.name && written < MAX_PLAYER_FILES) {
+      const hist = (histById.get(id) ?? []).sort((a, b) => a[0].localeCompare(b[0]))
+      await writeJson(`players/${tour}/${slug(bio.name)}.json`, {
+        name: bio.name, country: bio.country, current: rk,
+        history: { official: hist.map(([d, rank]) => ({ date: d, rank })) },
+      })
+      written++
+    }
+    leaders.push({ rank: rk, player: bio.name, country: bio.country, points: rPoints(r) })
   }
-  console.log(`  → ${written} fiches joueur (semaine ${latestDate})`)
-
-  const leaders = latest.slice(0, 100).map(r => {
-    const bio = pById.get(r.player)
-    return { rank: Number(r.rank), player: bio?.name ?? r.player, country: bio?.country, points: Number(r.points) || undefined }
-  })
-  await writeJson(`rankings/${tour}/${SEASON}.json`, leaders)
-  console.log(`  → rankings/${tour}/${SEASON}.json (${leaders.length})`)
+  console.log(`  → ${written} fiches joueur, ${leaders.length} leaders`)
+  await writeJson(`rankings/${tour}/${SEASON}.json`, leaders.slice(0, 100))
 
   console.log(`[${tour}] tournaments ${SEASON}…`)
   try {
-    const matches = parseCSV(await readFirst(dir, [`${tour}_matches_${SEASON}.csv`]))
-    const byTourney = new Map()
-    for (const m of matches) {
-      const key = m.tourney_id || m.tourney_name
-      if (!key) continue
-      if (!byTourney.has(key)) {
-        byTourney.set(key, { name: m.tourney_name, category: m.tourney_level, surface: m.surface, start: isoDate(m.tourney_date), winner: undefined })
-      }
-      if ((m.round || '').toUpperCase() === 'F' && m.winner_name) byTourney.get(key).winner = m.winner_name
-    }
-    const tournaments = [...byTourney.values()].sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+    const ts = await apiAll(`/${tour}/v1/tournaments`, { season: SEASON })
+    const tournaments = ts.map(t => ({
+      name: t.name ?? t.title, category: t.category ?? t.level, surface: t.surface,
+      location: t.location ?? t.city, country: t.country ?? t.country_code,
+      start: t.start_date ?? t.start ?? t.date,
+    })).sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')))
     await writeJson(`tournaments/${tour}/${SEASON}.json`, tournaments)
     console.log(`  → tournaments/${tour}/${SEASON}.json (${tournaments.length})`)
   } catch (e) {
@@ -130,6 +133,7 @@ async function buildTour(tour) {
   }
 }
 
+if (!KEY) { console.error('BALLDONTLIE_KEY manquant (secret).'); process.exit(1) }
 for (const tour of ['atp', 'wta']) {
   await buildTour(tour).catch(e => console.error(`[${tour}] ÉCHEC — ${e.message}`))
 }

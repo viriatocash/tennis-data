@@ -1,7 +1,6 @@
-# Régénère les JSON de données (classements/tournois) depuis Jeff Sackmann
+# Régénère les JSON de données (classements, historique de rang, tournois) ATP & WTA
 # 1×/semaine (+ manuel + à chaque maj du script) et commit le résultat.
-# Les CSV Sackmann sont récupérés par git (actions/checkout, fiable) — pas de fetch
-# raw.githubusercontent (rate-limité depuis les runners).
+# Source = API BallDontLie (clé = secret BALLDONTLIE_KEY, jamais exposée).
 
 name: build-tennis-data
 
@@ -25,35 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Récupération de la source (repos Sackmann). TOLÉRANT : si la source est
-      # indisponible (repos retirés/privés), l'étape n'échoue pas — l'Action re-tentera
-      # à la prochaine exécution. Adapter l'URL ici quand une source stable est choisie.
-      - name: Récupérer les données (sparse)
-        continue-on-error: true
-        env:
-          GIT_TERMINAL_PROMPT: '0'
-        run: |
-          for t in atp wta; do
-            if git clone --depth 1 --filter=blob:none --sparse \
-                 "https://github.com/JeffSackmann/tennis_${t}.git" "sackmann/${t}"; then
-              git -C "sackmann/${t}" sparse-checkout set --no-cone \
-                "${t}_players.csv" "${t}_rankings_20s.csv" "${t}_rankings_current.csv" "${t}_matches_2026.csv" || true
-              echo "--- sackmann/${t} ---"; ls -la "sackmann/${t}" | grep -E '\.csv|total' || true
-            else
-              echo "⚠ source ${t} indisponible (repo Sackmann retiré ?) — on saute."
-            fi
-          done
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Générer les JSON
         run: node build.mjs
+        env:
+          BALLDONTLIE_KEY: ${{ secrets.BALLDONTLIE_KEY }}
 
       - name: Commit si changement
         run: |
-          rm -rf sackmann
           git config user.name  "tennis-data-bot"
           git config user.email "bot@users.noreply.github.com"
           git add -A
