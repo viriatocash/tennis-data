@@ -25,20 +25,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # git clone direct des repos PUBLICS Sackmann (token dans l'URL — évite le prompt
-      # d'auth du runner et le 404 API d'actions/checkout tiers).
-      - name: Récupérer les données Sackmann (sparse)
+      # Récupération de la source (repos Sackmann). TOLÉRANT : si la source est
+      # indisponible (repos retirés/privés), l'étape n'échoue pas — l'Action re-tentera
+      # à la prochaine exécution. Adapter l'URL ici quand une source stable est choisie.
+      - name: Récupérer les données (sparse)
+        continue-on-error: true
         env:
-          TOKEN: ${{ github.token }}
           GIT_TERMINAL_PROMPT: '0'
         run: |
-          set -e
           for t in atp wta; do
-            git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${TOKEN}@github.com/JeffSackmann/tennis_${t}.git" "sackmann/${t}"
-            git -C "sackmann/${t}" sparse-checkout set --no-cone \
-              "${t}_players.csv" "${t}_rankings_20s.csv" "${t}_rankings_current.csv" "${t}_matches_2026.csv"
-            echo "--- sackmann/${t} ---"; ls -la "sackmann/${t}" | grep -E '\.csv|total' || true
+            if git clone --depth 1 --filter=blob:none --sparse \
+                 "https://github.com/JeffSackmann/tennis_${t}.git" "sackmann/${t}"; then
+              git -C "sackmann/${t}" sparse-checkout set --no-cone \
+                "${t}_players.csv" "${t}_rankings_20s.csv" "${t}_rankings_current.csv" "${t}_matches_2026.csv" || true
+              echo "--- sackmann/${t} ---"; ls -la "sackmann/${t}" | grep -E '\.csv|total' || true
+            else
+              echo "⚠ source ${t} indisponible (repo Sackmann retiré ?) — on saute."
+            fi
           done
 
       - uses: actions/setup-node@v4
