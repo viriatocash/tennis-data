@@ -1,0 +1,66 @@
+# Régénère les JSON de données (classements/tournois) depuis Jeff Sackmann
+# 1×/semaine (+ manuel + à chaque maj du script) et commit le résultat.
+# Les CSV Sackmann sont récupérés par git (actions/checkout, fiable) — pas de fetch
+# raw.githubusercontent (rate-limité depuis les runners).
+
+name: build-tennis-data
+
+on:
+  push:
+    paths:
+      - build.mjs
+      - .github/workflows/build.yml
+  schedule:
+    - cron: '17 6 * * 1'   # lundis 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Récupérer les données ATP
+        uses: actions/checkout@v4
+        with:
+          repository: JeffSackmann/tennis_atp
+          path: sackmann/atp
+          sparse-checkout: |
+            atp_players.csv
+            atp_rankings_20s.csv
+            atp_rankings_current.csv
+            atp_matches_202*.csv
+          sparse-checkout-cone-mode: false
+
+      - name: Récupérer les données WTA
+        uses: actions/checkout@v4
+        with:
+          repository: JeffSackmann/tennis_wta
+          path: sackmann/wta
+          sparse-checkout: |
+            wta_players.csv
+            wta_rankings_20s.csv
+            wta_rankings_current.csv
+            wta_matches_202*.csv
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Générer les JSON
+        run: node build.mjs
+
+      - name: Commit si changement
+        run: |
+          rm -rf sackmann
+          git config user.name  "tennis-data-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then echo "Aucun changement."; exit 0; fi
+          git commit -m "data: maj classements/tournois $(date -u +%F)"
+          git pull --rebase origin main || true
+          git push
