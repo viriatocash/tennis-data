@@ -90,7 +90,11 @@ async function buildTour(tour) {
       const id = p.id ?? r.player_id
       const rk = rRank(r)
       if (id == null || !Number.isFinite(rk)) continue
-      if (!bioById.has(id)) bioById.set(id, { name: pName(p), country: pCountry(p) })
+      if (!bioById.has(id)) bioById.set(id, {
+        name: pName(p), country: pCountry(p),
+        age: p.age ?? undefined, height: p.height_cm ?? undefined,
+        weight: p.weight_kg ?? undefined, hand: p.plays ?? undefined,
+      })
       ;(histById.get(id) ?? histById.set(id, []).get(id)).push([date, rk])
     }
     latest = rows   // la dernière itération = la plus récente
@@ -109,6 +113,7 @@ async function buildTour(tour) {
       const hist = (histById.get(id) ?? []).sort((a, b) => a[0].localeCompare(b[0]))
       await writeJson(`players/${tour}/${slug(bio.name)}.json`, {
         name: bio.name, country: bio.country, current: rk,
+        age: bio.age, height: bio.height, weight: bio.weight, hand: bio.hand,
         history: { official: hist.map(([d, rank]) => ({ date: d, rank })) },
       })
       written++
@@ -117,6 +122,13 @@ async function buildTour(tour) {
   }
   console.log(`  → ${written} fiches joueur, ${leaders.length} leaders`)
   await writeJson(`rankings/${tour}/${SEASON}.json`, leaders.slice(0, 100))
+
+  // Index de noms (résolution « E. Mertens » → « Elise Mertens ») : tous les joueurs vus.
+  const index = [...bioById.values()]
+    .filter(b => b.name)
+    .map(b => ({ slug: slug(b.name), name: b.name, country: b.country }))
+  await writeJson(`index/${tour}.json`, index)
+  console.log(`  → index/${tour}.json (${index.length})`)
 
   console.log(`[${tour}] tournaments ${SEASON}…`)
   try {

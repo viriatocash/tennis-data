@@ -11,6 +11,8 @@ on:
       - 'players/**'
       - 'rankings/**'
       - 'tournaments/**'
+      - 'stats/**'
+      - 'index/**'
   schedule:
     - cron: '17 6 * * 1'   # lundis 06:17 UTC
   workflow_dispatch: {}
@@ -28,10 +30,13 @@ jobs:
         with:
           node-version: 20
 
-      - name: Générer les JSON
+      - name: Générer les JSON (classements/joueurs/bio/index)
         run: node build.mjs
         env:
           BALLDONTLIE_KEY: ${{ secrets.BALLDONTLIE_KEY }}
+
+      - name: Générer les stats service/retour (Match Charting Project)
+        run: node build-mcp-stats.mjs
 
       - name: Commit si changement
         run: |
