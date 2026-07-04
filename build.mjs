@@ -80,6 +80,17 @@ async function buildTour(tour) {
   let latest = []                         // dernière semaine (leaders)
   let firstLogged = false
 
+  // Bio (âge/taille/poids/main) — UNIQUEMENT via /players (les rankings ne la portent pas).
+  const bioFull = new Map()
+  try {
+    const all = await apiAll(`/${tour}/v1/players`)
+    for (const pp of all) if (pp?.id != null) bioFull.set(pp.id, {
+      age: pp.age ?? undefined, height: pp.height_cm ?? undefined,
+      weight: pp.weight_kg ?? undefined, hand: pp.plays ?? undefined,
+    })
+    console.log(`  bio: ${bioFull.size} joueurs`)
+  } catch (e) { console.warn(`  bio indispo: ${e.message}`) }
+
   for (const date of dates) {
     let rows
     try { rows = await api(`/${tour}/v1/rankings`, { date, per_page: 100 }).then(j => j.data ?? []) }
@@ -90,11 +101,7 @@ async function buildTour(tour) {
       const id = p.id ?? r.player_id
       const rk = rRank(r)
       if (id == null || !Number.isFinite(rk)) continue
-      if (!bioById.has(id)) bioById.set(id, {
-        name: pName(p), country: pCountry(p),
-        age: p.age ?? undefined, height: p.height_cm ?? undefined,
-        weight: p.weight_kg ?? undefined, hand: p.plays ?? undefined,
-      })
+      if (!bioById.has(id)) bioById.set(id, { name: pName(p), country: pCountry(p) })
       ;(histById.get(id) ?? histById.set(id, []).get(id)).push([date, rk])
     }
     latest = rows   // la dernière itération = la plus récente
@@ -111,9 +118,10 @@ async function buildTour(tour) {
     const bio = bioById.get(id) ?? { name: pName(p), country: pCountry(p) }
     if (bio.name && written < MAX_PLAYER_FILES) {
       const hist = (histById.get(id) ?? []).sort((a, b) => a[0].localeCompare(b[0]))
+      const fb = bioFull.get(id) ?? {}
       await writeJson(`players/${tour}/${slug(bio.name)}.json`, {
         name: bio.name, country: bio.country, current: rk,
-        age: bio.age, height: bio.height, weight: bio.weight, hand: bio.hand,
+        age: fb.age, height: fb.height, weight: fb.weight, hand: fb.hand,
         history: { official: hist.map(([d, rank]) => ({ date: d, rank })) },
       })
       written++
