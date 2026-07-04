@@ -1,5 +1,5 @@
-# Régénère les JSON de données (classements, historique de rang, tournois) ATP & WTA
-# 1×/semaine (+ manuel + à chaque maj du script) et commit le résultat.
+# Régénère les JSON de données (classements, bio, index, stats service/retour) ATP & WTA
+# 1×/jour (+ manuel + à chaque maj du script) et commit le résultat.
 # Source = API BallDontLie (clé = secret BALLDONTLIE_KEY, jamais exposée).
 
 name: build-tennis-data
@@ -14,7 +14,7 @@ on:
       - 'stats/**'
       - 'index/**'
   schedule:
-    - cron: '17 6 * * 1'   # lundis 06:17 UTC
+    - cron: '17 6 * * *'   # tous les jours 06:17 UTC (rafraîchissement quotidien)
   workflow_dispatch: {}
 
 permissions:
