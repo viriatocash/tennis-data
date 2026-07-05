@@ -1,6 +1,8 @@
 # Régénère les JSON de données (classements, bio, index, stats service/retour) ATP & WTA
 # 1×/jour (+ manuel + à chaque maj du script) et commit le résultat.
-# Source = API BallDontLie (clé = secret BALLDONTLIE_KEY, jamais exposée).
+# Sources : BallDontLie (base rankings/history/tournois, secret BALLDONTLIE_KEY) +
+# api-tennis.com (enrichissement V/D/GC/sets/ELO/SOS + vainqueurs, secret API_TENNIS_KEY).
+# Les deux clés sont des secrets GitHub, jamais exposées.
 
 name: build-tennis-data
 
@@ -30,10 +32,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Générer les JSON (classements/joueurs/bio/index)
+      - name: Générer les JSON (classements/joueurs/bio/index + enrichissement api-tennis)
         run: node build.mjs
         env:
           BALLDONTLIE_KEY: ${{ secrets.BALLDONTLIE_KEY }}
+          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
 
       - name: Générer les stats service/retour (Match Charting Project)
         run: node build-mcp-stats.mjs
