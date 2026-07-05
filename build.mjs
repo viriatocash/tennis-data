@@ -274,7 +274,7 @@ async function getSeasonFixtures(season) {
   if (_aptFixtures) return _aptFixtures
   const now = new Date()
   const out = []
-  let cur = new Date(Date.UTC(season - 1, 0, 1))
+  let cur = new Date(Date.UTC(season - 2, 0, 1))   // 3 saisons (N-2, N-1, N) : ELO plus profond + historique
   while (cur <= now) {
     const start = new Date(cur)
     const endD = new Date(cur); endD.setUTCDate(endD.getUTCDate() + 9)
