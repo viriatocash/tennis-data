@@ -8,6 +8,7 @@
 //                                         elo, sos, ao, rg, wimbledon, uso } ]
 //   tournaments/{tour}/{season}.json→ [ { name, category, surface, location, country, start,
 //                                         end, winner, prize } ]  (end/winner/prize si fournis)
+//   momentum/{tour}/{season}.json   → { risers:[…], fallers:[…] } (vs-Expected + W-L 20 derniers + rangΔ)
 //
 // BASE (BallDontLie, gratuit) : rank/player/country/points + wkMove (mouvement) + ytd (Δ 1er janv).
 // ENRICHISSEMENT (api-tennis.com, secret API_TENNIS_KEY) : wins/losses/winPct/titles/GC/sets/elo/sos
@@ -270,24 +271,28 @@ async function enrichFromApiTennis(tour, season) {
   const want = tour === 'wta' ? 'wta' : 'atp'
   const now = new Date()
   const fixtures = []
-  for (let m = 0; m < 12; m++) {
-    const start = new Date(Date.UTC(season, m, 1))
-    if (start > now) break
-    let end = new Date(Date.UTC(season, m + 1, 0))
-    if (end > now) end = now
-    const ds = start.toISOString().slice(0, 10), de = end.toISOString().slice(0, 10)
-    try {
-      const rows = await apt('get_fixtures', { date_start: ds, date_stop: de, event_type: tour.toUpperCase(), timezone: 'UTC' })
-      fixtures.push(...rows)
-    } catch (e) { console.warn(`  apt fixtures ${ds}: ${e.message}`) }
-    await sleep(400)
+  // Balaye la saison précédente ET la courante : ELO « chaud » + 20 derniers matchs fiables
+  // même en début de saison. Les stats de colonnes restent filtrées sur la saison en cours.
+  for (let y = season - 1; y <= season; y++) {
+    for (let m = 0; m < 12; m++) {
+      const start = new Date(Date.UTC(y, m, 1))
+      if (start > now) break
+      let end = new Date(Date.UTC(y, m + 1, 0))
+      if (end > now) end = now
+      const ds = start.toISOString().slice(0, 10), de = end.toISOString().slice(0, 10)
+      try {
+        const rows = await apt('get_fixtures', { date_start: ds, date_stop: de, event_type: tour.toUpperCase(), timezone: 'UTC' })
+        fixtures.push(...rows)
+      } catch (e) { console.warn(`  apt fixtures ${ds}: ${e.message}`) }
+      await sleep(400)
+    }
   }
   if (fixtures[0]) console.log(`  ex. apt fixture: ${JSON.stringify(fixtures[0]).slice(0, 260)}`)
   console.log(`  api-tennis fixtures ${tour}: ${fixtures.length}`)
-  if (!fixtures.length) return { players: new Map(), tourWinners: new Map() }
+  if (!fixtures.length) return { players: new Map(), tourWinners: new Map(), momentum: new Map() }
 
   const agg = new Map()   // slug → agrégats
-  const get = name => { const s = slug(name); let a = agg.get(s); if (!a) { a = { wins: 0, losses: 0, setsW: 0, setsL: 0, gameDiff: 0, setCount: 0, titles: 0, gs: {} }; agg.set(s, a) } return a }
+  const get = name => { const s = slug(name); let a = agg.get(s); if (!a) { a = { name, wins: 0, losses: 0, setsW: 0, setsL: 0, gameDiff: 0, setCount: 0, titles: 0, gs: {} }; agg.set(s, a) } return a }
   const ordered = []      // pour l'ELO daté : { date, w:slug, l:slug }
   const tourWinners = new Map()
 
@@ -298,40 +303,58 @@ async function enrichFromApiTennis(tour, season) {
     const s1 = slug(n1), s2 = slug(n2)
     const rnd = normRound(f.tournament_round)
     const winSlug = f.event_winner === 'First Player' ? s1 : f.event_winner === 'Second Player' ? s2 : null
-    const a = get(n1), b = get(n2)
+    const a = get(n1), b = get(n2)   // crée les entrées (nom) pour tous — ELO/momentum toutes années
+    const isCur = String(f.event_date || '').slice(0, 4) === String(season)
 
-    if (winSlug === s1) { a.wins++; b.losses++ }
-    else if (winSlug === s2) { b.wins++; a.losses++ }
+    // Stats de colonnes (V/D, sets, titres, GC, vainqueurs) : SAISON EN COURS uniquement.
+    if (isCur) {
+      if (winSlug === s1) { a.wins++; b.losses++ }
+      else if (winSlug === s2) { b.wins++; a.losses++ }
 
-    for (const sc of (f.scores ?? [])) {
-      const g1 = parseInt(String(sc.score_first), 10), g2 = parseInt(String(sc.score_second), 10)
-      if (!Number.isFinite(g1) || !Number.isFinite(g2)) continue
-      a.setCount++; b.setCount++; a.gameDiff += (g1 - g2); b.gameDiff += (g2 - g1)
-      if (g1 > g2) { a.setsW++; b.setsL++ } else if (g2 > g1) { b.setsW++; a.setsL++ }
+      for (const sc of (f.scores ?? [])) {
+        const g1 = parseInt(String(sc.score_first), 10), g2 = parseInt(String(sc.score_second), 10)
+        if (!Number.isFinite(g1) || !Number.isFinite(g2)) continue
+        a.setCount++; b.setCount++; a.gameDiff += (g1 - g2); b.gameDiff += (g2 - g1)
+        if (g1 > g2) { a.setsW++; b.setsL++ } else if (g2 > g1) { b.setsW++; a.setsL++ }
+      }
+
+      if (rnd === 'F' && winSlug) {
+        get(winSlug === s1 ? n1 : n2).titles++
+        if (f.tournament_name) tourWinners.set(slug(f.tournament_name), winSlug === s1 ? n1 : n2)
+      }
+
+      const gs = GS.find(g => g.re.test(f.tournament_name || ''))
+      if (gs && rnd) for (const [nm, sn] of [[n1, s1], [n2, s2]]) {
+        const code = (rnd === 'F' && winSlug === sn) ? 'W' : rnd
+        const cur = get(nm).gs[gs.key]
+        if (!cur || (ROUND_ORDER[code] ?? 0) > (ROUND_ORDER[cur] ?? 0)) get(nm).gs[gs.key] = code
+      }
     }
 
-    if (rnd === 'F' && winSlug) {
-      get(winSlug === s1 ? n1 : n2).titles++
-      if (f.tournament_name) tourWinners.set(slug(f.tournament_name), winSlug === s1 ? n1 : n2)
-    }
-
-    const gs = GS.find(g => g.re.test(f.tournament_name || ''))
-    if (gs && rnd) for (const [nm, sn] of [[n1, s1], [n2, s2]]) {
-      const code = (rnd === 'F' && winSlug === sn) ? 'W' : rnd
-      const cur = get(nm).gs[gs.key]
-      if (!cur || (ROUND_ORDER[code] ?? 0) > (ROUND_ORDER[cur] ?? 0)) get(nm).gs[gs.key] = code
-    }
-
+    // ELO + momentum : TOUTES les années balayées (ordre chronologique).
     if (winSlug) ordered.push({ date: f.event_date || '', w: winSlug, l: winSlug === s1 ? s2 : s1 })
   }
 
   // ELO daté (K=32) sur l'ordre chronologique réel (event_date).
+  // + « vs Expected » : à chaque match, contribution = résultat réel (1/0) − proba ELO pré-match.
   ordered.sort((a, b) => String(a.date).localeCompare(String(b.date)))
   const elo = new Map(); const R = s => elo.get(s) ?? 1500; const K = 32
+  const perf = new Map()   // slug → [{ contrib, won }] chronologique (pour le momentum)
+  const pushP = (s, contrib, won) => { const arr = perf.get(s) ?? []; arr.push({ contrib, won }); perf.set(s, arr) }
   for (const o of ordered) {
     const ra = R(o.w), rb = R(o.l)
-    const ea = 1 / (1 + 10 ** ((rb - ra) / 400))
+    const ea = 1 / (1 + 10 ** ((rb - ra) / 400))   // proba que le vainqueur gagne
+    pushP(o.w, 1 - ea, true)                        // vainqueur : réel 1 − attendu ea
+    pushP(o.l, ea - 1, false)                       // perdant : réel 0 − attendu (1−ea)
     elo.set(o.w, ra + K * (1 - ea)); elo.set(o.l, rb - K * (1 - ea))
+  }
+  // Momentum : W-L + vs-Expected sur les 20 derniers matchs (≥15 matchs requis).
+  const momentum = new Map()
+  for (const [s, arr] of perf) {
+    const last = arr.slice(-20)
+    if (last.length < 15) continue
+    const w = last.filter(e => e.won).length
+    momentum.set(s, { name: agg.get(s)?.name ?? s, w20: w, l20: last.length - w, vsExpected: +last.reduce((a, e) => a + e.contrib, 0).toFixed(1) })
   }
   // SOS : ELO final moyen des adversaires → percentile 0-100.
   const opp = new Map()
@@ -358,7 +381,7 @@ async function enrichFromApiTennis(tour, season) {
       ao: a.gs.ao, rg: a.gs.rg, wimbledon: a.gs.wimbledon, uso: a.gs.uso,
     })
   }
-  return { players, tourWinners }
+  return { players, tourWinners, momentum }
 }
 
 // Dotation → chaîne lisible (« $1,691,602 »). Tolère nombre brut ou chaîne déjà formatée.
@@ -471,12 +494,12 @@ async function buildTour(tour) {
 
   // ENRICHISSEMENT api-tennis (source choisie) : V/D, GC, sets, ELO, SOS par slug de nom
   // + vainqueurs de tournois. try/catch = ne casse jamais la sortie de base.
-  let aptPlayers = new Map(), tourWinners = new Map()
+  let aptPlayers = new Map(), tourWinners = new Map(), momentumMap = new Map()
   if (APT_KEY) {
     try {
       const r = await enrichFromApiTennis(tour, SEASON)
-      aptPlayers = r.players; tourWinners = r.tourWinners
-      console.log(`  api-tennis: ${aptPlayers.size} joueurs enrichis · ${tourWinners.size} vainqueurs de tournois`)
+      aptPlayers = r.players; tourWinners = r.tourWinners; momentumMap = r.momentum
+      console.log(`  api-tennis: ${aptPlayers.size} joueurs enrichis · ${tourWinners.size} vainqueurs · ${momentumMap.size} momentum`)
     } catch (e) { console.warn(`  api-tennis indisponible: ${e.message}`) }
   } else {
     console.log('  API_TENNIS_KEY absent — enrichissement api-tennis ignoré (WK±/YTD gratuits seuls)')
@@ -506,6 +529,35 @@ async function buildTour(tour) {
   await writeJson(`rankings/${tour}/${SEASON}.json`, leaders)
   await writeJson(`tournaments/${tour}/${SEASON}.json`, tournaments)
   console.log(`  → rankings/${tour}/${SEASON}.json (${leaders.length}) · tournaments (${tournaments.length})`)
+
+  // Momentum index (risers/fallers) : vs-Expected + rangΔ 60j. Pays/rang via l'historique BallDontLie.
+  if (momentumMap.size) {
+    const slugCountry = new Map(), slugRank60 = new Map(), rankNowBySlug = new Map()
+    for (const l of leadersRaw) rankNowBySlug.set(slug(l.player), l.rank)
+    const target60 = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10)
+    for (const [id, b] of bioById) {
+      if (!b.name) continue
+      const s = slug(b.name)
+      if (b.country) slugCountry.set(s, b.country)
+      const h = histById.get(id)
+      if (h && h.length) {
+        const sorted = [...h].sort((a, b) => a[0].localeCompare(b[0]))
+        let r60
+        for (const [d, rk] of sorted) { if (d <= target60) r60 = rk; else break }
+        slugRank60.set(s, r60 ?? sorted[0][1])
+      }
+    }
+    const rows = []
+    for (const [s, m] of momentumMap) {
+      const rankNow = rankNowBySlug.get(s), r60 = slugRank60.get(s)
+      rows.push({ player: m.name, country: slugCountry.get(s), w: m.w20, l: m.l20, vsExpected: m.vsExpected, rankDelta: (rankNow != null && r60 != null) ? (r60 - rankNow) : undefined })
+    }
+    rows.sort((a, b) => b.vsExpected - a.vsExpected)
+    const risers = rows.slice(0, 15)
+    const fallers = rows.slice(-15).reverse()
+    await writeJson(`momentum/${tour}/${SEASON}.json`, { risers, fallers })
+    console.log(`  → momentum/${tour}/${SEASON}.json (${rows.length} joueurs)`)
+  }
 
   // Index de noms (résolution « E. Mertens » → « Elise Mertens ») : tous les joueurs vus.
   const index = [...bioById.values()]
