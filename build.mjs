@@ -34,9 +34,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 async function api(path, params = {}) {
   const url = new URL(BASE + path)
   for (const [k, v] of Object.entries(params)) if (v != null && v !== '') url.searchParams.set(k, v)
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     const res = await fetch(url, { headers: { Authorization: KEY } })
-    if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue }
+    if (res.status === 429) { await sleep(2500 * (attempt + 1)); continue }   // BallDontLie strict → backoff patient
     if (!res.ok) throw new Error(`HTTP ${res.status} ${path} ${await res.text().catch(() => '')}`.slice(0, 200))
     return res.json()
   }
@@ -48,7 +48,7 @@ async function apiAll(path, params = {}) {   // suit meta.next_cursor
     const j = await api(path, { ...params, per_page: 100, cursor })
     out.push(...(j.data ?? []))
     cursor = j.meta?.next_cursor ?? j.meta?.next_page
-    await sleep(350)
+    await sleep(900)
   } while (cursor)
   return out
 }
@@ -245,15 +245,40 @@ async function apt(method, params = {}) {
   url.searchParams.set('method', method)
   url.searchParams.set('APIkey', APT_KEY)
   for (const [k, v] of Object.entries(params)) if (v != null && v !== '') url.searchParams.set(k, String(v))
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 6; attempt++) {
     const res = await fetch(url)
-    if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue }
+    if (res.status === 429 || res.status >= 500) { await sleep(1200 * (attempt + 1)); continue }   // retry 429 ET 5xx
     if (!res.ok) throw new Error(`APT ${res.status} ${method}`)
     const j = await res.json().catch(() => ({}))
     if (!Array.isArray(j.result)) { console.warn(`  apt ${method}: réponse sans result[] → ${JSON.stringify(j).slice(0, 160)}`); return [] }
     return j.result
   }
-  throw new Error(`APT 429 répété ${method}`)
+  throw new Error(`APT ${method} — échec répété (429/5xx)`)
+}
+
+// Récupère TOUS les fixtures (toutes tournées) de la saison N-1 + N, en chunks de 10 jours
+// (les plages d'un mois font planter get_fixtures en 500). 1 seul fetch, mis en cache et
+// réutilisé pour ATP et WTA (filtrés ensuite via fxCircuit).
+let _aptFixtures = null
+async function getSeasonFixtures(season) {
+  if (_aptFixtures) return _aptFixtures
+  const now = new Date()
+  const out = []
+  let cur = new Date(Date.UTC(season - 1, 0, 1))
+  while (cur <= now) {
+    const start = new Date(cur)
+    const endD = new Date(cur); endD.setUTCDate(endD.getUTCDate() + 9)
+    const e = endD > now ? now : endD
+    const ds = start.toISOString().slice(0, 10), de = e.toISOString().slice(0, 10)
+    try { out.push(...await apt('get_fixtures', { date_start: ds, date_stop: de, timezone: 'UTC' })) }
+    catch (err) { console.warn(`  apt fixtures ${ds}..${de}: ${err.message}`) }
+    await sleep(300)
+    cur = new Date(cur); cur.setUTCDate(cur.getUTCDate() + 10)
+  }
+  if (out[0]) console.log(`  ex. apt fixture: ${JSON.stringify(out[0]).slice(0, 220)}`)
+  console.log(`  api-tennis fixtures totaux (N-1+N): ${out.length}`)
+  _aptFixtures = out
+  return out
 }
 
 // Circuit d'un fixture api-tennis (event_type_type) → tour, pour filtrer doubles/challenger/ITF.
@@ -270,26 +295,11 @@ function fxCircuit(f) {
 // le balayage mensuel de get_fixtures. Agrégats indexés par SLUG DE NOM (merge sur les leaders).
 async function enrichFromApiTennis(tour, season) {
   const want = tour === 'wta' ? 'wta' : 'atp'
-  const now = new Date()
-  const fixtures = []
-  // Balaye la saison précédente ET la courante : ELO « chaud » + 20 derniers matchs fiables
-  // même en début de saison. Les stats de colonnes restent filtrées sur la saison en cours.
-  for (let y = season - 1; y <= season; y++) {
-    for (let m = 0; m < 12; m++) {
-      const start = new Date(Date.UTC(y, m, 1))
-      if (start > now) break
-      let end = new Date(Date.UTC(y, m + 1, 0))
-      if (end > now) end = now
-      const ds = start.toISOString().slice(0, 10), de = end.toISOString().slice(0, 10)
-      try {
-        const rows = await apt('get_fixtures', { date_start: ds, date_stop: de, timezone: 'UTC' })   // pas d'event_type (rejeté par api-tennis) → filtre via fxCircuit
-        fixtures.push(...rows)
-      } catch (e) { console.warn(`  apt fixtures ${ds}: ${e.message}`) }
-      await sleep(400)
-    }
-  }
-  if (fixtures[0]) console.log(`  ex. apt fixture: ${JSON.stringify(fixtures[0]).slice(0, 260)}`)
-  console.log(`  api-tennis fixtures ${tour}: ${fixtures.length}`)
+  // Saison N-1 + N (ELO « chaud » + 20 derniers matchs fiables) ; stats de colonnes filtrées
+  // sur la saison en cours. Fixtures récupérés une fois (cache), filtrés par tournée ici.
+  const all = await getSeasonFixtures(season)
+  const fixtures = all.filter(f => fxCircuit(f) === want)
+  console.log(`  api-tennis ${tour}: ${fixtures.length} fixtures (sur ${all.length} toutes tournées)`)
   if (!fixtures.length) return { players: new Map(), tourWinners: new Map(), momentum: new Map() }
 
   const agg = new Map()   // slug → agrégats
@@ -434,7 +444,7 @@ async function buildTour(tour) {
       ;(histById.get(id) ?? histById.set(id, []).get(id)).push([date, rk])
     }
     latest = rows   // la dernière itération = la plus récente
-    await sleep(350)
+    await sleep(900)
   }
 
   // Variation hebdo (mouvement) + Δ depuis le 1er janvier, par joueur.
