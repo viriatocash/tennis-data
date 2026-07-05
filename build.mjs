@@ -66,6 +66,16 @@ function slug(name) {
   return name.normalize('NFD').replace(/[̀-ͯ]/g, '')
     .toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
+// Clé de matching entre sources : api-tennis abrège le prénom (« J. Sinner ») tandis que
+// BallDontLie donne le nom complet (« Jannik Sinner »). On matche sur NOM + INITIALE du prénom :
+// « sinner|j ». On joint tout sauf le prénom (gère « de Minaur », « Auger-Aliassime »).
+function matchKey(name) {
+  const parts = String(name || '').replace(/\./g, ' ').trim().split(/\s+/).filter(Boolean)
+  if (parts.length < 2) return slug(name || '')
+  const initial = (parts[0][0] || '').toLowerCase()
+  const last = slug(parts.slice(1).join('-'))
+  return `${last}|${initial}`
+}
 async function writeJson(path, data) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify(data))
@@ -303,7 +313,7 @@ async function enrichFromApiTennis(tour, season) {
   if (!fixtures.length) return { players: new Map(), tourWinners: new Map(), momentum: new Map() }
 
   const agg = new Map()   // slug → agrégats
-  const get = name => { const s = slug(name); let a = agg.get(s); if (!a) { a = { name, wins: 0, losses: 0, setsW: 0, setsL: 0, gameDiff: 0, setCount: 0, titles: 0, gs: {} }; agg.set(s, a) } return a }
+  const get = name => { const s = matchKey(name); let a = agg.get(s); if (!a) { a = { name, wins: 0, losses: 0, setsW: 0, setsL: 0, gameDiff: 0, setCount: 0, titles: 0, gs: {} }; agg.set(s, a) } return a }
   const ordered = []      // pour l'ELO daté : { date, w:slug, l:slug }
   const tourWinners = new Map()
 
@@ -311,7 +321,7 @@ async function enrichFromApiTennis(tour, season) {
     if (fxCircuit(f) !== want) continue
     const n1 = f.event_first_player, n2 = f.event_second_player
     if (!n1 || !n2) continue
-    const s1 = slug(n1), s2 = slug(n2)
+    const s1 = matchKey(n1), s2 = matchKey(n2)
     const rnd = normRound(f.tournament_round)
     const winSlug = f.event_winner === 'First Player' ? s1 : f.event_winner === 'Second Player' ? s2 : null
     const a = get(n1), b = get(n2)   // crée les entrées (nom) pour tous — ELO/momentum toutes années
@@ -526,9 +536,9 @@ async function buildTour(tour) {
   // Injecte les vainqueurs api-tennis dans les tournois (colonne « Vainqueur »).
   for (const t of tournaments) if (!t.winner && t.name) { const w = tourWinners.get(slug(t.name)); if (w) t.winner = w }
 
-  // Fusion → fichier rankings final (api-tennis par slug ; fallback BDL par id).
+  // Fusion → fichier rankings final (api-tennis par clé nom+initiale ; fallback BDL par id).
   const leaders = leadersRaw.slice(0, 100).map(l => {
-    const e = aptPlayers.get(slug(l.player)) ?? bdlEnrich.get(l.id) ?? {}
+    const e = aptPlayers.get(matchKey(l.player)) ?? bdlEnrich.get(l.id) ?? {}
     const row = {
       rank: l.rank, player: l.player, country: l.country, points: l.points,
       wkMove: moveById.get(l.id), ytd: ytdFor(l.id, l.rank),
@@ -541,27 +551,29 @@ async function buildTour(tour) {
   await writeJson(`tournaments/${tour}/${SEASON}.json`, tournaments)
   console.log(`  → rankings/${tour}/${SEASON}.json (${leaders.length}) · tournaments (${tournaments.length})`)
 
-  // Momentum index (risers/fallers) : vs-Expected + rangΔ 60j. Pays/rang via l'historique BallDontLie.
+  // Momentum index (risers/fallers) : vs-Expected + rangΔ 60j. Pays/rang/nom via l'historique
+  // BallDontLie, indexé par la MÊME clé nom+initiale que le momentum (noms abrégés api-tennis).
   if (momentumMap.size) {
-    const slugCountry = new Map(), slugRank60 = new Map(), rankNowBySlug = new Map()
-    for (const l of leadersRaw) rankNowBySlug.set(slug(l.player), l.rank)
+    const kCountry = new Map(), kRank60 = new Map(), kRankNow = new Map(), kName = new Map()
+    for (const l of leadersRaw) kRankNow.set(matchKey(l.player), l.rank)
     const target60 = new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10)
     for (const [id, b] of bioById) {
       if (!b.name) continue
-      const s = slug(b.name)
-      if (b.country) slugCountry.set(s, b.country)
+      const s = matchKey(b.name)
+      kName.set(s, b.name)                       // nom complet BallDontLie (pour l'affichage)
+      if (b.country) kCountry.set(s, b.country)
       const h = histById.get(id)
       if (h && h.length) {
         const sorted = [...h].sort((a, b) => a[0].localeCompare(b[0]))
         let r60
         for (const [d, rk] of sorted) { if (d <= target60) r60 = rk; else break }
-        slugRank60.set(s, r60 ?? sorted[0][1])
+        kRank60.set(s, r60 ?? sorted[0][1])
       }
     }
     const rows = []
     for (const [s, m] of momentumMap) {
-      const rankNow = rankNowBySlug.get(s), r60 = slugRank60.get(s)
-      rows.push({ player: m.name, country: slugCountry.get(s), w: m.w20, l: m.l20, vsExpected: m.vsExpected, rankDelta: (rankNow != null && r60 != null) ? (r60 - rankNow) : undefined })
+      const rankNow = kRankNow.get(s), r60 = kRank60.get(s)
+      rows.push({ player: kName.get(s) ?? m.name, country: kCountry.get(s), w: m.w20, l: m.l20, vsExpected: m.vsExpected, rankDelta: (rankNow != null && r60 != null) ? (r60 - rankNow) : undefined })
     }
     rows.sort((a, b) => b.vsExpected - a.vsExpected)
     const risers = rows.slice(0, 15)
