@@ -250,7 +250,8 @@ async function apt(method, params = {}) {
     if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue }
     if (!res.ok) throw new Error(`APT ${res.status} ${method}`)
     const j = await res.json().catch(() => ({}))
-    return Array.isArray(j.result) ? j.result : []
+    if (!Array.isArray(j.result)) { console.warn(`  apt ${method}: réponse sans result[] → ${JSON.stringify(j).slice(0, 160)}`); return [] }
+    return j.result
   }
   throw new Error(`APT 429 répété ${method}`)
 }
@@ -281,7 +282,7 @@ async function enrichFromApiTennis(tour, season) {
       if (end > now) end = now
       const ds = start.toISOString().slice(0, 10), de = end.toISOString().slice(0, 10)
       try {
-        const rows = await apt('get_fixtures', { date_start: ds, date_stop: de, event_type: tour.toUpperCase(), timezone: 'UTC' })
+        const rows = await apt('get_fixtures', { date_start: ds, date_stop: de, timezone: 'UTC' })   // pas d'event_type (rejeté par api-tennis) → filtre via fxCircuit
         fixtures.push(...rows)
       } catch (e) { console.warn(`  apt fixtures ${ds}: ${e.message}`) }
       await sleep(400)
